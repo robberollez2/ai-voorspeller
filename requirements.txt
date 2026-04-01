@@ -5,3 +5,4 @@ scipy
 xgboost
 joblib
 openpyxl
+sklearn
