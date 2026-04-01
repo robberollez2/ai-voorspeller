@@ -4,3 +4,4 @@ numpy
 scipy
 xgboost
 joblib
+openpyxl

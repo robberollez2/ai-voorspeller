@@ -314,7 +314,15 @@ if st.button("Voorspel", type="primary"):
     exp_home, exp_away = result["expected"]
     probs = result["probs"]
 
-    st.markdown(f"### Verwachte score: **{home_team} {exp_home:.2f} - {exp_away:.2f} {away_team}**")
+    predicted_home = max(0, int(round(exp_home)))
+    predicted_away = max(0, int(round(exp_away)))
+
+    st.markdown(
+        f"### Voorspelde uitslag: **{home_team} {predicted_home} - {predicted_away} {away_team}**"
+    )
+    st.caption(
+        f"Verwachte goals (xG): {home_team} {exp_home:.2f} - {exp_away:.2f} {away_team}"
+    )
 
     st.write("Winstkansen:")
     st.progress(min(1.0, probs["home"]), text=f"{home_team} wint: {probs['home']:.1%}")
