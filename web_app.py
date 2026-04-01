@@ -216,6 +216,10 @@ def predict_match(home, away, df, model_home, model_away, league_avg):
     pred_home = np.expm1(model_home.predict(X_pred)[0])
     pred_away = np.expm1(model_away.predict(X_pred)[0])
 
+    pred_home, pred_away, last_date = apply_head_to_head_boost(
+        home, away, df, pred_home, pred_away, weight=0.3
+    )
+
     pred_home = float(np.clip(pred_home, 0.2, 5))
     pred_away = float(np.clip(pred_away, 0.2, 5))
 
@@ -225,6 +229,12 @@ def predict_match(home, away, df, model_home, model_away, league_avg):
     draw = sum(p for (h, a), p in scores if h == a)
     away_win = sum(p for (h, a), p in scores if h < a)
 
+    total_prob = home_win + draw + away_win
+    if total_prob > 0:
+        home_win /= total_prob
+        draw /= total_prob
+        away_win /= total_prob
+
     return {
         "expected": (pred_home, pred_away),
         "scores": scores,
@@ -233,6 +243,7 @@ def predict_match(home, away, df, model_home, model_away, league_avg):
             "draw": draw,
             "away": away_win,
         },
+        "h2h_date": last_date,
     }
 
 
@@ -323,6 +334,34 @@ def evaluate_models(df, model_home, model_away):
     }
 
 
+def apply_head_to_head_boost(home, away, df, exp_home, exp_away, weight=0.3):
+    """Blend predicted goals with latest head-to-head score if available."""
+    if "Datum" not in df.columns:
+        return exp_home, exp_away, None
+
+    h2h = df[
+        ((df["Thuisteam"] == home) & (df["Uitteam"] == away))
+        | ((df["Thuisteam"] == away) & (df["Uitteam"] == home))
+    ]
+
+    if h2h.empty:
+        return exp_home, exp_away, None
+
+    last = h2h.sort_values("Datum").iloc[-1]
+    if last["Thuisteam"] == home:
+        last_home = float(last["Goals Thuis"])
+        last_away = float(last["Goals Uit"])
+    else:
+        # omgedraaide fixture
+        last_home = float(last["Goals Uit"])
+        last_away = float(last["Goals Thuis"])
+
+    boosted_home = (1 - weight) * exp_home + weight * last_home
+    boosted_away = (1 - weight) * exp_away + weight * last_away
+
+    return boosted_home, boosted_away, last["Datum"]
+
+
 # =========================================
 # Streamlit UI
 # =========================================
@@ -383,6 +422,8 @@ if current_metrics:
         f"MAE thuis {current_metrics['mae_home']:.2f}, MAE uit {current_metrics['mae_away']:.2f}, "
         f"uitkomst-accuratie {current_metrics['outcome_acc']:.0%}."
     )
+    if current_metrics["samples"] < 15:
+        st.warning("Let op: zeer kleine testset, accuratie kan overschat zijn.")
 
 model_choice = "Eigen getraind model" if use_custom else "Standaard model"
 
@@ -424,12 +465,17 @@ if st.button("Voorspel", type="primary"):
     predicted_home = max(0, int(round(exp_home)))
     predicted_away = max(0, int(round(exp_away)))
 
+    st.markdown("### Voorspelde uitslag:")
     st.markdown(
-        f"### Voorspelde uitslag: **{home_team} {predicted_home} - {predicted_away} {away_team}**"
+        f"<div style='font-size:40px;font-weight:800'>{predicted_home} - {predicted_away}</div>",
+        unsafe_allow_html=True,
     )
     st.caption(
         f"Verwachte goals (xG): {home_team} {exp_home:.2f} - {exp_away:.2f} {away_team}"
     )
+
+    if result.get("h2h_date") is not None:
+        st.caption(f"Laatste onderling resultaat meegewogen: {result['h2h_date'].date()}")
 
     st.write("Winstkansen:")
     st.progress(min(1.0, probs["home"]), text=f"{home_team} wint: {probs['home']:.1%}")
@@ -437,7 +483,3 @@ if st.button("Voorspel", type="primary"):
     st.progress(min(1.0, probs["away"]), text=f"{away_team} wint: {probs['away']:.1%}")
 
 st.divider()
-
-st.info(
-    "Start met 'streamlit run web_app.py' in deze map. Installeer eerst: pip install streamlit pandas numpy joblib xgboost scipy scikit-learn"
-)
