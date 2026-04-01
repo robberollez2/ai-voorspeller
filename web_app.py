@@ -312,14 +312,9 @@ if st.button("Voorspel", type="primary"):
         result = predict_match(home_team, away_team, current_df, model_home, model_away, league_avg)
 
     exp_home, exp_away = result["expected"]
-    scores = result["scores"]
     probs = result["probs"]
 
     st.markdown(f"### Verwachte score: **{home_team} {exp_home:.2f} - {exp_away:.2f} {away_team}**")
-
-    st.write("Top 5 meest waarschijnlijke scores:")
-    for (h, a), p in scores[:5]:
-        st.write(f"- {h}-{a}: {p:.2%}")
 
     st.write("Winstkansen:")
     st.progress(min(1.0, probs["home"]), text=f"{home_team} wint: {probs['home']:.1%}")
