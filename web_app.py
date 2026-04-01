@@ -4,8 +4,8 @@ import numpy as np
 import joblib
 from sklearn.model_selection import TimeSeriesSplit
 import streamlit as st
-from xgboost import XGBRegressor
 from scipy.stats import poisson
+from xgboost import XGBRegressor
 
 # =========================================
 # Data loading helpers
@@ -286,6 +286,43 @@ def _tune_params(X, y_log, y_raw):
     return {**base_params, **best[0]}
 
 
+def evaluate_models(df, model_home, model_away):
+    """Quick hold-out eval on last 20% of matches; returns MAE and outcome accuracy."""
+    if len(df) < 10:
+        return None  # te weinig data
+
+    features, _ = create_features(df)
+    X = features.drop(columns=["home_goals", "away_goals"])
+    y_home = features["home_goals"].reset_index(drop=True)
+    y_away = features["away_goals"].reset_index(drop=True)
+    X = X.reset_index(drop=True)
+
+    split_idx = int(len(X) * 0.8)
+    if split_idx == 0 or split_idx == len(X):
+        return None
+
+    X_test = X.iloc[split_idx:]
+    y_home_test = y_home.iloc[split_idx:]
+    y_away_test = y_away.iloc[split_idx:]
+
+    pred_home = np.clip(np.expm1(model_home.predict(X_test)), 0, None)
+    pred_away = np.clip(np.expm1(model_away.predict(X_test)), 0, None)
+
+    mae_home = float(np.mean(np.abs(pred_home - y_home_test)))
+    mae_away = float(np.mean(np.abs(pred_away - y_away_test)))
+
+    outcome_pred = np.sign(pred_home - pred_away)
+    outcome_true = np.sign(y_home_test - y_away_test)
+    acc = float(np.mean(outcome_pred == outcome_true))
+
+    return {
+        "mae_home": mae_home,
+        "mae_away": mae_away,
+        "outcome_acc": acc,
+        "samples": int(len(X_test)),
+    }
+
+
 # =========================================
 # Streamlit UI
 # =========================================
@@ -294,7 +331,6 @@ def get_state_key(model_key, suffix):
     return f"{model_key}_{suffix}"
 
 st.title("Match voorspeller")
-st.write("Kies twee teams, voorspel de score en bekijk de winstkansen. Upload eventueel je eigen Excel om opnieuw te trainen.")
 
 for _key in MODEL_CONFIGS:
     model_k = get_state_key(_key, "custom_models")
@@ -306,6 +342,9 @@ for _key in MODEL_CONFIGS:
     avg_k = get_state_key(_key, "custom_league_avg")
     if avg_k not in st.session_state:
         st.session_state[avg_k] = None
+    met_k = get_state_key(_key, "metrics")
+    if met_k not in st.session_state:
+        st.session_state[met_k] = None
 
 
 # Load default data/models lazily per model type
@@ -314,57 +353,36 @@ def _load_defaults(model_key: str):
     cfg = MODEL_CONFIGS[model_key]
     base_df = load_base_dataframe(cfg)
     model_home, model_away, league_avg = load_default_models(base_df, cfg)
-    return base_df, model_home, model_away, league_avg
+    metrics = evaluate_models(base_df, model_home, model_away)
+    return base_df, model_home, model_away, league_avg, metrics
 
-st.subheader("Modelkeuze")
 model_key = st.radio("Kies team", list(MODEL_CONFIGS.keys()), horizontal=True)
 cfg = MODEL_CONFIGS[model_key]
-
-st.caption(
-    "Vereiste kolommen: Datum, Thuisteam, Uitteam, Goals Thuis, Goals Uit. Datum kan dd-mm-jjjj of jjjj-mm-dd zijn."
-)
-
-uploaded = st.file_uploader(f"Upload Excel ({model_key})", type=["xlsx"], key=f"uploader_{model_key}")
 
 # Defaults
 base_available = True
 try:
-    base_df, base_model_home, base_model_away, base_league_avg = _load_defaults(model_key)
+    base_df, base_model_home, base_model_away, base_league_avg, base_metrics = _load_defaults(model_key)
+    st.session_state[get_state_key(model_key, "metrics")] = base_metrics
 except FileNotFoundError as exc:
     base_available = False
     base_df = None
-    base_model_home = base_model_away = base_league_avg = None
-    st.warning(f"Geen default dataset voor {model_key}: {exc}. Upload een bestand om te trainen.")
-
-if uploaded:
-    try:
-        user_df = pd.read_excel(uploaded)
-        user_df.columns = user_df.columns.str.strip()
-        missing = {"Datum", "Thuisteam", "Uitteam", "Goals Thuis", "Goals Uit"} - set(user_df.columns)
-        if missing:
-            st.error(f"Ontbrekende kolommen: {', '.join(sorted(missing))}")
-            user_df = None
-        else:
-            user_df["Datum"] = pd.to_datetime(user_df["Datum"])
-            user_df = user_df.sort_values("Datum").reset_index(drop=True)
-            st.success("Bestand geladen. Train het model om deze data te gebruiken.")
-            st.dataframe(user_df.head())
-            if st.button(f"Train model ({model_key})", type="primary"):
-                with st.spinner("Model trainen..."):
-                    m_home, m_away, l_avg = train_models(user_df, cfg)
-                st.session_state[get_state_key(model_key, "custom_models")] = (m_home, m_away)
-                st.session_state[get_state_key(model_key, "custom_df")] = user_df
-                st.session_state[get_state_key(model_key, "custom_league_avg")] = l_avg
-                st.success(f"Nieuw {model_key}-model getraind en opgeslagen.")
-                st.caption("Let op: training gebruikt een lichte CV-tuning; kan iets langer duren.")
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Kon het bestand niet lezen: {exc}")
+    base_model_home = base_model_away = base_league_avg = base_metrics = None
+    st.warning(f"Geen default dataset voor {model_key}: {exc}. Plaats het datasetbestand en herstart de app.")
 
 st.divider()
 
 st.subheader("Voorspel een match")
 custom_models = st.session_state[get_state_key(model_key, "custom_models")]
 use_custom = custom_models is not None
+
+current_metrics = st.session_state[get_state_key(model_key, "metrics")]
+if current_metrics:
+    st.caption(
+        f"Model getest op {current_metrics['samples']} wedstrijden: "
+        f"MAE thuis {current_metrics['mae_home']:.2f}, MAE uit {current_metrics['mae_away']:.2f}, "
+        f"uitkomst-accuratie {current_metrics['outcome_acc']:.0%}."
+    )
 
 model_choice = "Eigen getraind model" if use_custom else "Standaard model"
 
@@ -419,10 +437,6 @@ if st.button("Voorspel", type="primary"):
     st.progress(min(1.0, probs["away"]), text=f"{away_team} wint: {probs['away']:.1%}")
 
 st.divider()
-
-st.subheader("Excel structuur")
-st.text("Kolommen:\n- Datum (dd-mm-jjjj of jjjj-mm-dd)\n- Thuisteam\n- Uitteam\n- Goals Thuis\n- Goals Uit")
-st.caption("Elke rij is een gespeelde match. Voorzie minstens 10-15 wedstrijden per team voor betere schattingen.")
 
 st.info(
     "Start met 'streamlit run web_app.py' in deze map. Installeer eerst: pip install streamlit pandas numpy joblib xgboost scipy scikit-learn"
